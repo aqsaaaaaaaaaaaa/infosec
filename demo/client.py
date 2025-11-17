@@ -23,6 +23,15 @@ with open(ROOT_PEM,'rb') as f: root_pem = f.read()
 root_cert = x509.load_pem_x509_certificate(root_pem, default_backend())
 
 def verify_cert_signed_by_root(pem_bytes):
+    """
+    Verify that a certificate (PEM format) is signed by the root CA.
+    
+    Args:
+        pem_bytes (bytes): Certificate in PEM format
+        
+    Returns:
+        tuple: (bool, cert_object) — True if valid, False otherwise; cert_object or error string
+    """
     cert = x509.load_pem_x509_certificate(pem_bytes, default_backend())
     pubkey = root_cert.public_key()
     try:
@@ -37,6 +46,15 @@ def verify_cert_signed_by_root(pem_bytes):
         return False, str(e)
 
 def sign_with_client(data_bytes):
+    """
+    Sign data with the client's private RSA key using SHA-256 and PKCS#1 v1.5.
+    
+    Args:
+        data_bytes (bytes): Data to sign
+        
+    Returns:
+        bytes: RSA signature
+    """
     h = SHA256.new(data_bytes)
     return pkcs1_15.new(client_key).sign(h)
 
@@ -52,6 +70,21 @@ def recvall(sock, n):
     return data
 
 def recv_json(sock):
+    """
+    Receive a JSON message from the socket using length-prefixed framing.
+    
+    Reads 4-byte big-endian length prefix, then reads that many bytes, decodes JSON.
+    
+    Args:
+        sock: Socket object
+        
+    Returns:
+        dict: Decoded JSON object
+        
+    Raises:
+        ConnectionError: If socket closes before all data is received
+        json.JSONDecodeError: If data is not valid JSON
+    """
     # First 4 bytes = message length
     L_bytes = recvall(sock, 4)
     L = int.from_bytes(L_bytes, 'big')
@@ -60,6 +93,15 @@ def recv_json(sock):
 
 
 def send_json(sock, obj):
+    """
+    Send a JSON message using length-prefixed framing.
+    
+    Encodes object as JSON, prefixes with 4-byte big-endian length, sends all.
+    
+    Args:
+        sock: Socket object
+        obj (dict): Object to serialize and send
+    """
     data = json.dumps(obj).encode()
     sock.send(len(data).to_bytes(4,'big') + data)
 
