@@ -40,18 +40,9 @@ def sign_with_client(data_bytes):
     h = SHA256.new(data_bytes)
     return pkcs1_15.new(client_key).sign(h)
 
-# --- New reliable recv_json ---
+# --- Reliable recv_json ---
 def recvall(sock, n):
-    data = b''
-    while len(data) < n:
-        packet = sock.recv(n - len(data))
-        if not packet:
-            raise ConnectionError("Socket closed before receiving all data")
-        data += packet
-    return data
-
-def recvall(sock, n):
-    """Receive exactly n bytes from the socket."""
+    """Receive exactly n bytes from the socket, blocking until all data arrives."""
     data = b''
     while len(data) < n:
         packet = sock.recv(n - len(data))
