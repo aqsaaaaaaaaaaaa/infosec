@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # demo/client.py
 import socket, json, os, base64, time
+from datetime import datetime, timezone
 from crypto_helpers import RFC3526_2048 as p, g, derive_aes128_from_shared, pkcs7_pad
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import AES
@@ -10,6 +11,11 @@ from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives import serialization
+
+# Certificate error codes
+BAD_CERT_INVALID = "BAD_CERT_INVALID"
+BAD_CERT_EXPIRED = "BAD_CERT_EXPIRED"
+BAD_CERT_HOSTNAME = "BAD_CERT_HOSTNAME"
 
 CERT_DIR = "../certs"
 CLIENT_KEY = os.path.join(CERT_DIR, "client.key")
@@ -22,28 +28,72 @@ with open(ROOT_PEM,'rb') as f: root_pem = f.read()
 
 root_cert = x509.load_pem_x509_certificate(root_pem, default_backend())
 
-def verify_cert_signed_by_root(pem_bytes):
+def verify_cert_signed_by_root(pem_bytes, expected_hostname=None):
     """
     Verify that a certificate (PEM format) is signed by the root CA.
+    Also checks: expiry, signature validity, and hostname/SAN.
     
     Args:
         pem_bytes (bytes): Certificate in PEM format
+        expected_hostname (str): Expected hostname (CN or SAN) to validate against
         
     Returns:
-        tuple: (bool, cert_object) — True if valid, False otherwise; cert_object or error string
+        tuple: (bool, cert_object_or_error_code) — True if valid, False otherwise
     """
-    cert = x509.load_pem_x509_certificate(pem_bytes, default_backend())
-    pubkey = root_cert.public_key()
     try:
-        pubkey.verify(
-            cert.signature,
-            cert.tbs_certificate_bytes,
-            asym_padding.PKCS1v15(),
-            cert.signature_hash_algorithm,
-        )
+        cert = x509.load_pem_x509_certificate(pem_bytes, default_backend())
+        
+        # 1) Check expiry
+        now = datetime.now(timezone.utc)
+        if now < cert.not_valid_before_utc:
+            return False, BAD_CERT_INVALID  # Not yet valid
+        if now > cert.not_valid_after_utc:
+            return False, BAD_CERT_EXPIRED  # Expired
+        
+        # 2) Verify signature with root CA
+        pubkey = root_cert.public_key()
+        try:
+            pubkey.verify(
+                cert.signature,
+                cert.tbs_certificate_bytes,
+                asym_padding.PKCS1v15(),
+                cert.signature_hash_algorithm,
+            )
+        except Exception:
+            return False, BAD_CERT_INVALID
+        
+        # 3) Check hostname/SAN if provided
+        if expected_hostname:
+            hostname_valid = False
+            
+            # Check SAN (Subject Alternative Name)
+            try:
+                san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+                for name in san_ext.value:
+                    if isinstance(name, x509.DNSName):
+                        if name.value.lower() == expected_hostname.lower():
+                            hostname_valid = True
+                            break
+            except x509.ExtensionNotFound:
+                pass  # No SAN extension
+            
+            # Check CN (Common Name) if SAN not found
+            if not hostname_valid:
+                try:
+                    cn_attr = cert.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+                    if cn_attr:
+                        cn_value = cn_attr[0].value.lower()
+                        if cn_value == expected_hostname.lower():
+                            hostname_valid = True
+                except Exception:
+                    pass
+            
+            if not hostname_valid:
+                return False, BAD_CERT_HOSTNAME
+        
         return True, cert
     except Exception as e:
-        return False, str(e)
+        return False, BAD_CERT_INVALID
 
 def sign_with_client(data_bytes):
     """
@@ -119,9 +169,18 @@ resp = recv_json(s)
 server_pem = resp.get("server_cert").encode()
 B = int(resp.get("B"))
 
-ok, info = verify_cert_signed_by_root(server_pem)
+ok, info = verify_cert_signed_by_root(server_pem, expected_hostname="server.local")
 if not ok:
-    print("Server cert verification failed:", info); s.close(); exit(1)
+    error_msg = "Server cert verification failed"
+    if info == BAD_CERT_EXPIRED:
+        error_msg += ": Certificate expired"
+    elif info == BAD_CERT_HOSTNAME:
+        error_msg += ": Hostname mismatch"
+    elif info == BAD_CERT_INVALID:
+        error_msg += ": Invalid certificate"
+    print(error_msg)
+    s.close()
+    exit(1)
 print("Server cert verified.")
 
 shared = pow(B, a, p)
@@ -129,7 +188,13 @@ K = derive_aes128_from_shared(shared)
 print("Derived AES key (hex):", K.hex())
 
 # Prepare payload
-payload = {"type":"register","username":"student1","email":"s1@example.com","pwd":"password123"}
+# Choose between registration or login
+use_login = True  # Set to True to test login instead of registration
+
+if use_login:
+    payload = {"type": "login", "username": "student1", "pwd": "password123"}
+else:
+    payload = {"type": "register", "username": "student1", "email": "s1@example.com", "pwd": "password123"}
 pt = json.dumps(payload).encode()
 iv = os.urandom(16)
 cipher = AES.new(K, AES.MODE_CBC, iv)
